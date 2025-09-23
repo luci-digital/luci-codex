@@ -1118,7 +1118,7 @@ impl StatusHistoryCell {
         config: &Config,
         usage: &TokenUsage,
         session_id: &Option<ConversationId>,
-        rate_limits: Option<&RateLimitSnapshotEvent>,
+        rate_limits: Option<&RateLimitSnapshot>,
     ) -> Self {
         let config_entries = create_config_summary_entries(config);
         let model_display = compose_model_display(config, &config_entries);
@@ -1370,7 +1370,7 @@ fn compose_account_display(config: &Config) -> Option<StatusAccountDisplay> {
     None
 }
 
-fn compose_rate_limit_data(snapshot: Option<&RateLimitSnapshotEvent>) -> StatusRateLimitData {
+fn compose_rate_limit_data(snapshot: Option<&RateLimitSnapshot>) -> StatusRateLimitData {
     match snapshot {
         Some(snapshot) => StatusRateLimitData::Available(vec![
             StatusRateLimitRow {
@@ -1429,7 +1429,7 @@ pub(crate) fn new_status_output(
     config: &Config,
     usage: &TokenUsage,
     session_id: &Option<ConversationId>,
-    rate_limits: Option<&RateLimitSnapshotEvent>,
+    rate_limits: Option<&RateLimitSnapshot>,
 ) -> CompositeHistoryCell {
     let command = PlainHistoryCell {
         lines: vec!["/status".magenta().into()],
