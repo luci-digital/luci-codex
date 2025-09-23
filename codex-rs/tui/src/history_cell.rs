@@ -24,13 +24,12 @@ use codex_core::plan_tool::UpdatePlanArgs;
 use codex_core::project_doc::discover_project_doc_paths;
 use codex_core::protocol::FileChange;
 use codex_core::protocol::McpInvocation;
-use codex_core::protocol::RateLimitSnapshot;
+use codex_core::protocol::RateLimitSnapshotEvent;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol::SessionConfiguredEvent;
 use codex_core::protocol::TokenUsage;
 use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::mcp_protocol::ConversationId;
-use codex_protocol::num_format::format_with_separators;
 use codex_protocol::parse_command::ParsedCommand;
 use image::DynamicImage;
 use image::ImageReader;
@@ -631,7 +630,7 @@ impl HistoryCell for CompletedMcpToolCallWithImageOutput {
 }
 
 const TOOL_CALL_MAX_LINES: usize = 5;
-const SESSION_HEADER_MAX_INNER_WIDTH: usize = 56; // Just an eyeballed value
+const SESSION_HEADER_MAX_INNER_WIDTH: usize = 64; // Just an eyeballed value
 
 fn card_inner_width(width: u16, max_inner_width: usize) -> Option<usize> {
     if width < 4 {
@@ -690,13 +689,6 @@ fn title_case(s: &str) -> String {
     first.to_uppercase().collect::<String>() + &rest
 }
 
-fn pretty_provider_name(id: &str) -> String {
-    if id.eq_ignore_ascii_case("openai") {
-        "OpenAI".to_string()
-    } else {
-        title_case(id)
-    }
-}
 /// Return the emoji followed by a hair space (U+200A).
 /// Using only the hair space avoids excessive padding after the emoji while
 /// still providing a small visual gap across terminals.
@@ -866,51 +858,123 @@ impl HistoryCell for SessionHeaderHistoryCell {
 
         let make_row = |spans: Vec<Span<'static>>| Line::from(spans);
 
-        // Title line rendered inside the box: ">_ OpenAI Codex (vX)"
-        let title_spans: Vec<Span<'static>> = vec![
+        let mut rows: Vec<Line<'static>> = Vec::new();
+        rows.push(make_row(vec![
             Span::from(">_ ").dim(),
             Span::from("OpenAI Codex").bold(),
             Span::from(" ").dim(),
-            Span::from(format!("(v{})", self.version)).dim(),
-        ];
+            Span::from(format!("(v{})", crate::version::CODEX_CLI_VERSION)).dim(),
+        ]));
 
-        const CHANGE_MODEL_HINT_COMMAND: &str = "/model";
-        const CHANGE_MODEL_HINT_EXPLANATION: &str = " to change";
-        const DIR_LABEL: &str = "directory:";
-        let label_width = DIR_LABEL.len();
-        let model_label = format!(
-            "{model_label:<label_width$}",
-            model_label = "model:",
-            label_width = label_width
-        );
-        let reasoning_label = self.reasoning_label();
-        let mut model_spans: Vec<Span<'static>> = vec![
-            Span::from(format!("{model_label} ")).dim(),
-            Span::from(self.model.clone()),
-        ];
-        if let Some(reasoning) = reasoning_label {
-            model_spans.push(Span::from(" "));
-            model_spans.push(Span::from(reasoning));
-        }
-        model_spans.push("   ".dim());
-        model_spans.push(CHANGE_MODEL_HINT_COMMAND.cyan());
-        model_spans.push(CHANGE_MODEL_HINT_EXPLANATION.dim());
+        rows.push(make_row(Vec::new()));
 
-        let dir_label = format!("{DIR_LABEL:<label_width$}");
-        let dir_prefix = format!("{dir_label} ");
-        let dir_prefix_width = UnicodeWidthStr::width(dir_prefix.as_str());
+        rows.push(make_row(vec![
+            Span::from(" model: ").dim(),
+            Span::from(self.model_display.clone()),
+        ]));
+
+        let dir_label = " directory: ";
+        let dir_prefix_width = UnicodeWidthStr::width(dir_label);
         let dir_max_width = inner_width.saturating_sub(dir_prefix_width);
-        let dir = self.format_directory(Some(dir_max_width));
-        let dir_spans = vec![Span::from(dir_prefix).dim(), Span::from(dir)];
+        let directory =
+            SessionHeaderHistoryCell::format_directory_inner(&self.directory, Some(dir_max_width));
+        rows.push(make_row(vec![
+            Span::from(dir_label).dim(),
+            Span::from(directory),
+        ]));
 
-        let lines = vec![
-            make_row(title_spans),
-            make_row(Vec::new()),
-            make_row(model_spans),
-            make_row(dir_spans),
+        rows.push(make_row(vec![
+            Span::from(" approval: ").dim(),
+            Span::from(self.approval.clone()),
+        ]));
+
+        rows.push(make_row(vec![
+            Span::from(" sandbox: ").dim(),
+            Span::from(self.sandbox.clone()),
+        ]));
+
+        rows.push(make_row(vec![
+            Span::from(" agents.md: ").dim(),
+            Span::from(self.agents_summary.clone()),
+        ]));
+
+        if let Some(account) = &self.account {
+            let value = match account {
+                StatusAccountDisplay::ChatGpt { email, plan } => match (email, plan) {
+                    (Some(email), Some(plan)) => format!("{email} ({plan})"),
+                    (Some(email), None) => email.clone(),
+                    (None, Some(plan)) => plan.clone(),
+                    (None, None) => "ChatGPT".to_string(),
+                },
+                StatusAccountDisplay::ApiKey => {
+                    "API key configured (run codex login to use ChatGPT)".to_string()
+                }
+            };
+            rows.push(make_row(vec![
+                Span::from(" account: ").dim(),
+                Span::from(value),
+            ]));
+        }
+
+        if let Some(session_id) = &self.session_id {
+            rows.push(make_row(vec![
+                Span::from(" session: ").dim(),
+                Span::from(session_id.clone()),
+            ]));
+        }
+
+        rows.push(make_row(Vec::new()));
+
+        let total_fmt = format_tokens_compact(self.token_usage.total);
+        let input_fmt = format_tokens_compact(self.token_usage.input);
+        let output_fmt = format_tokens_compact(self.token_usage.output);
+
+        let mut usage_spans: Vec<Span<'static>> = vec![
+            Span::from(" Token usage: ").dim(),
+            Span::from(total_fmt),
+            Span::from(" (").dim(),
+            Span::from(input_fmt),
+            Span::from(" input").dim(),
+            Span::from(" + ").dim(),
+            Span::from(output_fmt),
+            Span::from(" output").dim(),
+            Span::from(")").dim(),
         ];
+        if self.token_usage.cached_input > 0 {
+            let cached_fmt = format_tokens_compact(self.token_usage.cached_input);
+            usage_spans.push(Span::from(" + ").dim());
+            usage_spans.push(Span::from(format!("{cached_fmt} cached")).dim());
+        }
+        rows.push(make_row(usage_spans));
 
-        with_border(lines)
+        match &self.rate_limits {
+            StatusRateLimitData::Available(rows_data) => {
+                let label_width = rows_data
+                    .iter()
+                    .map(|row| UnicodeWidthStr::width(row.label.as_str()))
+                    .max()
+                    .unwrap_or(0);
+                for row in rows_data {
+                    let padded = format!("{label:<label_width$}", label = row.label);
+                    let mut spans: Vec<Span<'static>> = Vec::new();
+                    spans.push(Span::from(format!(" {padded}: ")).dim());
+                    spans.push(Span::from(render_status_limit_progress_bar(
+                        row.percent_used,
+                    )));
+                    spans.push(" ".into());
+                    spans.push(Span::from(format_status_limit_summary(row.percent_used)));
+                    rows.push(make_row(spans));
+                }
+            }
+            StatusRateLimitData::Missing => {
+                rows.push(make_row(vec![
+                    Span::from(" limits: ").dim(),
+                    Span::from("data not available yet").dim(),
+                ]));
+            }
+        }
+
+        with_border(rows)
     }
 }
 
@@ -1078,183 +1142,376 @@ pub(crate) fn new_warning_event(message: String) -> PlainHistoryCell {
     }
 }
 
+// -- Status (/status) card rendering -----------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct StatusTokenUsageData {
+    total: u64,
+    input: u64,
+    cached_input: u64,
+    output: u64,
+}
+
+#[derive(Debug, Clone)]
+enum StatusAccountDisplay {
+    ChatGpt {
+        email: Option<String>,
+        plan: Option<String>,
+    },
+    ApiKey,
+}
+
+#[derive(Debug, Clone)]
+struct StatusRateLimitRow {
+    label: String,
+    percent_used: f64,
+}
+
+#[derive(Debug, Clone)]
+enum StatusRateLimitData {
+    Available(Vec<StatusRateLimitRow>),
+    Missing,
+}
+
+#[derive(Debug)]
+struct StatusHistoryCell {
+    model_display: String,
+    directory: PathBuf,
+    approval: String,
+    sandbox: String,
+    agents_summary: String,
+    account: Option<StatusAccountDisplay>,
+    session_id: Option<String>,
+    token_usage: StatusTokenUsageData,
+    rate_limits: StatusRateLimitData,
+}
+
+impl StatusHistoryCell {
+    fn new(
+        config: &Config,
+        usage: &TokenUsage,
+        session_id: &Option<ConversationId>,
+        rate_limits: Option<&RateLimitSnapshotEvent>,
+    ) -> Self {
+        let config_entries = create_config_summary_entries(config);
+        let model_display = compose_model_display(config, &config_entries);
+        let approval = config_entries
+            .iter()
+            .find(|(k, _)| *k == "approval")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let sandbox = match &config.sandbox_policy {
+            SandboxPolicy::DangerFullAccess => "danger-full-access".to_string(),
+            SandboxPolicy::ReadOnly => "read-only".to_string(),
+            SandboxPolicy::WorkspaceWrite { .. } => "workspace-write".to_string(),
+        };
+        let agents_summary = compose_agents_summary(config);
+        let account = compose_account_display(config);
+        let session_id = session_id.as_ref().map(|id| id.to_string());
+        let token_usage = StatusTokenUsageData {
+            total: usage.blended_total(),
+            input: usage.non_cached_input(),
+            cached_input: usage.cached_input_tokens,
+            output: usage.output_tokens,
+        };
+        let rate_limits = compose_rate_limit_data(rate_limits);
+
+        Self {
+            model_display,
+            directory: config.cwd.clone(),
+            approval,
+            sandbox,
+            agents_summary,
+            account,
+            session_id,
+            token_usage,
+            rate_limits,
+        }
+    }
+}
+
+impl HistoryCell for StatusHistoryCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let Some(inner_width) = card_inner_width(width, SESSION_HEADER_MAX_INNER_WIDTH) else {
+            return Vec::new();
+        };
+
+        let make_row = |spans: Vec<Span<'static>>| Line::from(spans);
+
+        let mut rows: Vec<Line<'static>> = Vec::new();
+        rows.push(make_row(vec![
+            Span::from(">_ ").dim(),
+            Span::from("OpenAI Codex").bold(),
+            Span::from(" ").dim(),
+            Span::from(format!("(v{})", crate::version::CODEX_CLI_VERSION)).dim(),
+        ]));
+
+        rows.push(make_row(Vec::new()));
+
+        rows.push(make_row(vec![
+            Span::from(" model: ").dim(),
+            Span::from(self.model_display.clone()),
+        ]));
+
+        let dir_label = " directory: ";
+        let dir_prefix_width = UnicodeWidthStr::width(dir_label);
+        let dir_max_width = inner_width.saturating_sub(dir_prefix_width);
+        let directory =
+            SessionHeaderHistoryCell::format_directory_inner(&self.directory, Some(dir_max_width));
+        rows.push(make_row(vec![
+            Span::from(dir_label).dim(),
+            Span::from(directory),
+        ]));
+
+        rows.push(make_row(vec![
+            Span::from(" approval: ").dim(),
+            Span::from(self.approval.clone()),
+        ]));
+
+        rows.push(make_row(vec![
+            Span::from(" sandbox: ").dim(),
+            Span::from(self.sandbox.clone()),
+        ]));
+
+        rows.push(make_row(vec![
+            Span::from(" agents.md: ").dim(),
+            Span::from(self.agents_summary.clone()),
+        ]));
+
+        if let Some(account) = &self.account {
+            let value = match account {
+                StatusAccountDisplay::ChatGpt { email, plan } => match (email, plan) {
+                    (Some(email), Some(plan)) => format!("{email} ({plan})"),
+                    (Some(email), None) => email.clone(),
+                    (None, Some(plan)) => plan.clone(),
+                    (None, None) => "ChatGPT".to_string(),
+                },
+                StatusAccountDisplay::ApiKey => {
+                    "API key configured (run codex login to use ChatGPT)".to_string()
+                }
+            };
+            rows.push(make_row(vec![
+                Span::from(" account: ").dim(),
+                Span::from(value),
+            ]));
+        }
+
+        if let Some(session_id) = &self.session_id {
+            rows.push(make_row(vec![
+                Span::from(" session: ").dim(),
+                Span::from(session_id.clone()),
+            ]));
+        }
+
+        rows.push(make_row(Vec::new()));
+
+        let total_fmt = format_tokens_compact(self.token_usage.total);
+        let input_fmt = format_tokens_compact(self.token_usage.input);
+        let output_fmt = format_tokens_compact(self.token_usage.output);
+
+        let mut usage_spans: Vec<Span<'static>> = vec![
+            Span::from(" Token usage: ").dim(),
+            Span::from(total_fmt),
+            Span::from(" (").dim(),
+            Span::from(input_fmt),
+            Span::from(" input").dim(),
+            Span::from(" + ").dim(),
+            Span::from(output_fmt),
+            Span::from(" output").dim(),
+            Span::from(")").dim(),
+        ];
+        if self.token_usage.cached_input > 0 {
+            let cached_fmt = format_tokens_compact(self.token_usage.cached_input);
+            usage_spans.push(Span::from(" + ").dim());
+            usage_spans.push(Span::from(format!("{cached_fmt} cached")).dim());
+        }
+        rows.push(make_row(usage_spans));
+
+        match &self.rate_limits {
+            StatusRateLimitData::Available(rows_data) => {
+                let label_width = rows_data
+                    .iter()
+                    .map(|row| UnicodeWidthStr::width(row.label.as_str()))
+                    .max()
+                    .unwrap_or(0);
+                for row in rows_data {
+                    let padded = format!("{label:<label_width$}", label = row.label);
+                    let mut spans: Vec<Span<'static>> = Vec::new();
+                    spans.push(Span::from(format!(" {padded}: ")).dim());
+                    spans.push(Span::from(render_status_limit_progress_bar(
+                        row.percent_used,
+                    )));
+                    spans.push(" ".into());
+                    spans.push(Span::from(format_status_limit_summary(row.percent_used)));
+                    rows.push(make_row(spans));
+                }
+            }
+            StatusRateLimitData::Missing => {
+                rows.push(make_row(vec![
+                    Span::from(" limits: ").dim(),
+                    Span::from("data not available yet").dim(),
+                ]));
+            }
+        }
+
+        with_border(rows)
+    }
+}
+
+fn compose_model_display(config: &Config, entries: &[(&str, String)]) -> String {
+    let mut details: Vec<String> = Vec::new();
+    if let Some((_, effort)) = entries.iter().find(|(k, _)| *k == "reasoning effort") {
+        details.push(format!("reasoning {}", title_case(effort)));
+    }
+    if entries
+        .iter()
+        .find(|(k, _)| *k == "reasoning summaries")
+        .map(|(_, v)| v.eq_ignore_ascii_case("on"))
+        .unwrap_or(false)
+    {
+        details.push("summaries on".to_string());
+    }
+
+    if details.is_empty() {
+        config.model.clone()
+    } else {
+        format!("{} ({})", config.model, details.join(", "))
+    }
+}
+
+fn compose_agents_summary(config: &Config) -> String {
+    match discover_project_doc_paths(config) {
+        Ok(paths) => {
+            let mut rels: Vec<String> = Vec::new();
+            for p in paths {
+                let display = if let Some(parent) = p.parent() {
+                    if parent == config.cwd {
+                        "AGENTS.md".to_string()
+                    } else {
+                        let mut cur = config.cwd.as_path();
+                        let mut ups = 0usize;
+                        let mut reached = false;
+                        while let Some(c) = cur.parent() {
+                            if cur == parent {
+                                reached = true;
+                                break;
+                            }
+                            cur = c;
+                            ups += 1;
+                        }
+                        if reached {
+                            let up = format!("..{}", std::path::MAIN_SEPARATOR);
+                            format!("{}AGENTS.md", up.repeat(ups))
+                        } else if let Ok(stripped) = p.strip_prefix(&config.cwd) {
+                            stripped.display().to_string()
+                        } else {
+                            p.display().to_string()
+                        }
+                    }
+                } else {
+                    p.display().to_string()
+                };
+                rels.push(display);
+            }
+            if rels.is_empty() {
+                "<none>".to_string()
+            } else {
+                rels.join(", ")
+            }
+        }
+        Err(_) => "<none>".to_string(),
+    }
+}
+
+fn compose_account_display(config: &Config) -> Option<StatusAccountDisplay> {
+    let auth_file = get_auth_file(&config.codex_home);
+    let auth = try_read_auth_json(&auth_file).ok()?;
+
+    if let Some(tokens) = auth.tokens.as_ref() {
+        let info = &tokens.id_token;
+        let email = info.email.clone();
+        let plan = info.get_chatgpt_plan_type().map(|p| title_case(p.as_str()));
+        return Some(StatusAccountDisplay::ChatGpt { email, plan });
+    }
+
+    if let Some(key) = auth.openai_api_key {
+        if !key.is_empty() {
+            return Some(StatusAccountDisplay::ApiKey);
+        }
+    }
+
+    None
+}
+
+fn compose_rate_limit_data(snapshot: Option<&RateLimitSnapshotEvent>) -> StatusRateLimitData {
+    match snapshot {
+        Some(snapshot) => StatusRateLimitData::Available(vec![
+            StatusRateLimitRow {
+                label: "5h limit".to_string(),
+                percent_used: snapshot.primary_used_percent,
+            },
+            StatusRateLimitRow {
+                label: "Weekly limit".to_string(),
+                percent_used: snapshot.secondary_used_percent,
+            },
+        ]),
+        None => StatusRateLimitData::Missing,
+    }
+}
+
+fn format_tokens_compact(value: u64) -> String {
+    if value == 0 {
+        return "0".to_string();
+    }
+    if value < 1_000 {
+        return value.to_string();
+    }
+
+    let (scaled, suffix) = if value >= 1_000_000_000_000 {
+        (value as f64 / 1_000_000_000_000.0, "T")
+    } else if value >= 1_000_000_000 {
+        (value as f64 / 1_000_000_000.0, "B")
+    } else if value >= 1_000_000 {
+        (value as f64 / 1_000_000.0, "M")
+    } else {
+        (value as f64 / 1_000.0, "K")
+    };
+
+    let decimals = if scaled < 10.0 {
+        2
+    } else if scaled < 100.0 {
+        1
+    } else {
+        0
+    };
+
+    let mut formatted = format!("{scaled:.prec$}", scaled = scaled, prec = decimals);
+    if formatted.contains('.') {
+        while formatted.ends_with('0') {
+            formatted.pop();
+        }
+        if formatted.ends_with('.') {
+            formatted.pop();
+        }
+    }
+
+    format!("{formatted}{suffix}")
+}
+
 pub(crate) fn new_status_output(
     config: &Config,
     usage: &TokenUsage,
     session_id: &Option<ConversationId>,
-    rate_limits: Option<&RateLimitSnapshot>,
-) -> PlainHistoryCell {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push("/status".magenta().into());
-
-    let config_entries = create_config_summary_entries(config);
-    let lookup = |k: &str| -> String {
-        config_entries
-            .iter()
-            .find(|(key, _)| *key == k)
-            .map(|(_, v)| v.clone())
-            .unwrap_or_default()
+    rate_limits: Option<&RateLimitSnapshotEvent>,
+) -> CompositeHistoryCell {
+    let command = PlainHistoryCell {
+        lines: vec!["/status".magenta().into()],
     };
+    let card = StatusHistoryCell::new(config, usage, session_id, rate_limits);
 
-    // 📂 Workspace
-    lines.push(vec![padded_emoji("📂").into(), "Workspace".bold()].into());
-    // Path (home-relative, e.g., ~/code/project)
-    let cwd_str = match relativize_to_home(&config.cwd) {
-        Some(rel) if !rel.as_os_str().is_empty() => {
-            let sep = std::path::MAIN_SEPARATOR;
-            format!("~{sep}{}", rel.display())
-        }
-        Some(_) => "~".to_string(),
-        None => config.cwd.display().to_string(),
-    };
-    lines.push(vec!["  • Path: ".into(), cwd_str.into()].into());
-    // Approval mode (as-is)
-    lines.push(vec!["  • Approval Mode: ".into(), lookup("approval").into()].into());
-    // Sandbox (simplified name only)
-    let sandbox_name = match &config.sandbox_policy {
-        SandboxPolicy::DangerFullAccess => "danger-full-access",
-        SandboxPolicy::ReadOnly => "read-only",
-        SandboxPolicy::WorkspaceWrite { .. } => "workspace-write",
-    };
-    lines.push(vec!["  • Sandbox: ".into(), sandbox_name.into()].into());
-
-    // AGENTS.md files discovered via core's project_doc logic
-    let agents_list = {
-        match discover_project_doc_paths(config) {
-            Ok(paths) => {
-                let mut rels: Vec<String> = Vec::new();
-                for p in paths {
-                    let display = if let Some(parent) = p.parent() {
-                        if parent == config.cwd {
-                            "AGENTS.md".to_string()
-                        } else {
-                            let mut cur = config.cwd.as_path();
-                            let mut ups = 0usize;
-                            let mut reached = false;
-                            while let Some(c) = cur.parent() {
-                                if cur == parent {
-                                    reached = true;
-                                    break;
-                                }
-                                cur = c;
-                                ups += 1;
-                            }
-                            if reached {
-                                let up = format!("..{}", std::path::MAIN_SEPARATOR);
-                                format!("{}AGENTS.md", up.repeat(ups))
-                            } else if let Ok(stripped) = p.strip_prefix(&config.cwd) {
-                                stripped.display().to_string()
-                            } else {
-                                p.display().to_string()
-                            }
-                        }
-                    } else {
-                        p.display().to_string()
-                    };
-                    rels.push(display);
-                }
-                rels
-            }
-            Err(_) => Vec::new(),
-        }
-    };
-    if agents_list.is_empty() {
-        lines.push("  • AGENTS files: (none)".into());
-    } else {
-        lines.push(vec!["  • AGENTS files: ".into(), agents_list.join(", ").into()].into());
+    CompositeHistoryCell {
+        parts: vec![Box::new(command), Box::new(card)],
     }
-    lines.push("".into());
-
-    // 👤 Account (only if ChatGPT tokens exist), shown under the first block
-    let auth_file = get_auth_file(&config.codex_home);
-    let auth = try_read_auth_json(&auth_file).ok();
-    let is_chatgpt_auth = auth
-        .as_ref()
-        .and_then(|auth| auth.tokens.as_ref())
-        .is_some();
-    if is_chatgpt_auth
-        && let Some(auth) = auth.as_ref()
-        && let Some(tokens) = auth.tokens.clone()
-    {
-        lines.push(vec![padded_emoji("👤").into(), "Account".bold()].into());
-        lines.push("  • Signed in with ChatGPT".into());
-
-        let info = tokens.id_token;
-        if let Some(email) = &info.email {
-            lines.push(vec!["  • Login: ".into(), email.clone().into()].into());
-        }
-
-        match auth.openai_api_key.as_deref() {
-            Some(key) if !key.is_empty() => {
-                lines.push("  • Using API key. Run codex login to use ChatGPT plan".into());
-            }
-            _ => {
-                let plan_text = info
-                    .get_chatgpt_plan_type()
-                    .map(|s| title_case(&s))
-                    .unwrap_or_else(|| "Unknown".to_string());
-                lines.push(vec!["  • Plan: ".into(), plan_text.into()].into());
-            }
-        }
-
-        lines.push("".into());
-    }
-
-    // 🧠 Model
-    lines.push(vec![padded_emoji("🧠").into(), "Model".bold()].into());
-    lines.push(vec!["  • Name: ".into(), config.model.clone().into()].into());
-    let provider_disp = pretty_provider_name(&config.model_provider_id);
-    lines.push(vec!["  • Provider: ".into(), provider_disp.into()].into());
-    // Only show Reasoning fields if present in config summary
-    let reff = lookup("reasoning effort");
-    if !reff.is_empty() {
-        lines.push(vec!["  • Reasoning Effort: ".into(), title_case(&reff).into()].into());
-    }
-    let rsum = lookup("reasoning summaries");
-    if !rsum.is_empty() {
-        lines.push(vec!["  • Reasoning Summaries: ".into(), title_case(&rsum).into()].into());
-    }
-
-    lines.push("".into());
-
-    // 💻 Client
-    let cli_version = crate::version::CODEX_CLI_VERSION;
-    lines.push(vec![padded_emoji("💻").into(), "Client".bold()].into());
-    lines.push(vec!["  • CLI Version: ".into(), cli_version.into()].into());
-    lines.push("".into());
-
-    // 📊 Token Usage
-    lines.push(vec!["📊 ".into(), "Token Usage".bold()].into());
-    if let Some(session_id) = session_id {
-        lines.push(vec!["  • Session ID: ".into(), session_id.to_string().into()].into());
-    }
-    // Input: <input> [+ <cached> cached]
-    let mut input_line_spans: Vec<Span<'static>> = vec![
-        "  • Input: ".into(),
-        format_with_separators(usage.non_cached_input()).into(),
-    ];
-    if usage.cached_input_tokens > 0 {
-        let cached = usage.cached_input_tokens;
-        input_line_spans.push(format!(" (+ {cached} cached)").into());
-    }
-    lines.push(Line::from(input_line_spans));
-    // Output: <output>
-    lines.push(Line::from(vec![
-        "  • Output: ".into(),
-        format_with_separators(usage.output_tokens).into(),
-    ]));
-    // Total: <total>
-    lines.push(Line::from(vec![
-        "  • Total: ".into(),
-        format_with_separators(usage.blended_total()).into(),
-    ]));
-
-    if is_chatgpt_auth {
-        lines.push("".into());
-        lines.extend(build_status_limit_lines(rate_limits));
-    }
-
-    PlainHistoryCell { lines }
 }
 
 /// Render a summary of configured MCP servers from the current `Config`.
@@ -1609,46 +1866,6 @@ fn format_mcp_invocation<'a>(invocation: McpInvocation) -> Line<'a> {
         ")".into(),
     ];
     invocation_spans.into()
-}
-
-fn build_status_limit_lines(snapshot: Option<&RateLimitSnapshot>) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> =
-        vec![vec![padded_emoji("⏱️").into(), "Usage Limits".bold()].into()];
-
-    match snapshot {
-        Some(snapshot) => {
-            let rows = [
-                ("5h limit".to_string(), snapshot.primary_used_percent),
-                ("Weekly limit".to_string(), snapshot.secondary_used_percent),
-            ];
-            let label_width = rows
-                .iter()
-                .map(|(label, _)| UnicodeWidthStr::width(label.as_str()))
-                .max()
-                .unwrap_or(0);
-            for (label, percent) in rows {
-                lines.push(build_status_limit_line(&label, percent, label_width));
-            }
-        }
-        None => lines.push("  • Send a message to load usage data.".into()),
-    }
-
-    lines
-}
-
-fn build_status_limit_line(label: &str, percent_used: f64, label_width: usize) -> Line<'static> {
-    let clamped_percent = percent_used.clamp(0.0, 100.0);
-    let progress = render_status_limit_progress_bar(clamped_percent);
-    let summary = format_status_limit_summary(clamped_percent);
-
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(5);
-    let padded_label = format!("{label:<label_width$}");
-    spans.push(format!("  • {padded_label}: ").into());
-    spans.push(progress.into());
-    spans.push(" ".into());
-    spans.push(summary.into());
-
-    Line::from(spans)
 }
 
 fn render_status_limit_progress_bar(percent_used: f64) -> String {
@@ -2146,7 +2363,7 @@ mod tests {
         // Long explanation forces wrapping; include long step text to verify step wrapping and alignment.
         let update = UpdatePlanArgs {
             explanation: Some(
-                "I’ll update Grafana call error handling by adding retries and clearer messages when the backend is unreachable."
+                "I'll update Grafana call error handling by adding retries and clearer messages when the backend is unreachable."
                     .to_string(),
             ),
             plan: vec![
