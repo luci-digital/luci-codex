@@ -79,6 +79,7 @@ use crate::history_cell::HistoryCell;
 use crate::history_cell::PatchEventType;
 use crate::markdown::append_markdown;
 use crate::slash_command::SlashCommand;
+use crate::status::new_status_output;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
 // streaming internals are provided by crate::streaming and crate::markdown_stream
@@ -1447,7 +1448,7 @@ impl ChatWidget {
             default_usage = TokenUsage::default();
             &default_usage
         };
-        self.add_to_history(history_cell::new_status_output(
+        self.add_to_history(new_status_output(
             &self.config,
             usage_ref,
             &self.conversation_id,
