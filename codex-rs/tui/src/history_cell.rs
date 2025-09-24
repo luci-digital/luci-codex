@@ -56,7 +56,7 @@ use unicode_width::UnicodeWidthStr;
 
 const STATUS_LIMIT_BAR_SEGMENTS: usize = 20;
 const STATUS_LIMIT_BAR_FILLED: &str = "█";
-const STATUS_LIMIT_BAR_EMPTY: &str = " ";
+const STATUS_LIMIT_BAR_EMPTY: &str = "░";
 
 #[derive(Clone, Debug)]
 pub(crate) struct CommandOutput {
@@ -1176,11 +1176,11 @@ impl HistoryCell for StatusHistoryCell {
         rows.push(make_row(Vec::new()));
 
         rows.push(make_row(vec![
-            Span::from(" model: ").dim(),
+            Span::from(" Model: ").dim(),
             Span::from(self.model_display.clone()),
         ]));
 
-        let dir_label = " directory: ";
+        let dir_label = " Directory: ";
         let dir_prefix_width = UnicodeWidthStr::width(dir_label);
         let dir_max_width = inner_width.saturating_sub(dir_prefix_width);
         let directory =
@@ -1191,17 +1191,17 @@ impl HistoryCell for StatusHistoryCell {
         ]));
 
         rows.push(make_row(vec![
-            Span::from(" approval: ").dim(),
+            Span::from(" Approval: ").dim(),
             Span::from(self.approval.clone()),
         ]));
 
         rows.push(make_row(vec![
-            Span::from(" sandbox: ").dim(),
+            Span::from(" Sandbox: ").dim(),
             Span::from(self.sandbox.clone()),
         ]));
 
         rows.push(make_row(vec![
-            Span::from(" agents.md: ").dim(),
+            Span::from(" Agents.md: ").dim(),
             Span::from(self.agents_summary.clone()),
         ]));
 
@@ -1218,14 +1218,14 @@ impl HistoryCell for StatusHistoryCell {
                 }
             };
             rows.push(make_row(vec![
-                Span::from(" account: ").dim(),
+                Span::from(" Account: ").dim(),
                 Span::from(value),
             ]));
         }
 
         if let Some(session_id) = &self.session_id {
             rows.push(make_row(vec![
-                Span::from(" session: ").dim(),
+                Span::from(" Session: ").dim(),
                 Span::from(session_id.clone()),
             ]));
         }
@@ -1237,7 +1237,7 @@ impl HistoryCell for StatusHistoryCell {
         let output_fmt = format_tokens_compact(self.token_usage.output);
 
         let mut usage_spans: Vec<Span<'static>> = vec![
-            Span::from(" Token usage: ").dim(),
+            Span::from(" Token Usage: ").dim(),
             Span::from(total_fmt),
             Span::from(" (").dim(),
             Span::from(input_fmt),
@@ -1275,7 +1275,7 @@ impl HistoryCell for StatusHistoryCell {
             }
             StatusRateLimitData::Missing => {
                 rows.push(make_row(vec![
-                    Span::from(" limits: ").dim(),
+                    Span::from(" Limits: ").dim(),
                     Span::from("data not available yet").dim(),
                 ]));
             }
@@ -1374,11 +1374,11 @@ fn compose_rate_limit_data(snapshot: Option<&RateLimitSnapshot>) -> StatusRateLi
     match snapshot {
         Some(snapshot) => StatusRateLimitData::Available(vec![
             StatusRateLimitRow {
-                label: "5h limit".to_string(),
+                label: "5h Limit".to_string(),
                 percent_used: snapshot.primary_used_percent,
             },
             StatusRateLimitRow {
-                label: "Weekly limit".to_string(),
+                label: "Weekly Limit".to_string(),
                 percent_used: snapshot.secondary_used_percent,
             },
         ]),
